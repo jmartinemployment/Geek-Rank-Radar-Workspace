@@ -1,0 +1,29 @@
+# Compiled output
+/dist
+**/dist/
+/tmp
+
+# Node
+/node_modules
+npm-debug.log
+yarn-error.log
+
+# IDEs and editors
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Environment variables & secrets
+.env
+.env.local
+.env.production
+.mcp.json
+
+# Prisma generated client
+src/generated/
+
+# System files
+.DS_Store
+Thumbs.db

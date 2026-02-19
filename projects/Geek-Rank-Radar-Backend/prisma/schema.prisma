@@ -1,0 +1,250 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma/client"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Geographic scan targets ─────────────────────────────────────────
+
+model ServiceArea {
+  id          String   @id @default(uuid())
+  name        String
+  state       String   @default("FL")
+  centerLat   Decimal  @db.Decimal(10, 7)
+  centerLng   Decimal  @db.Decimal(10, 7)
+  radiusMiles Decimal  @default(3.0) @db.Decimal(5, 2)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  scans Scan[]
+}
+
+// ─── Business taxonomy (self-referential tree) ───────────────────────
+
+model Category {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  parentId  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+
+  keywords   CategoryKeyword[]
+  businesses Business[]
+  scans      Scan[]
+}
+
+model CategoryKeyword {
+  id         String   @id @default(uuid())
+  categoryId String
+  keyword    String
+  priority   Int      @default(1)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@unique([categoryId, keyword])
+}
+
+// ─── The core asset: Business entity ─────────────────────────────────
+
+model Business {
+  id             String  @id @default(uuid())
+  name           String
+  normalizedName String
+  phone          String?
+  website        String?
+  email          String?
+
+  // Location
+  address      String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  zip          String?
+  lat          Decimal? @db.Decimal(10, 7)
+  lng          Decimal? @db.Decimal(10, 7)
+
+  // Classification
+  categoryId  String?
+  primaryType String?
+  types       String[]
+
+  // Google Business Profile
+  googlePlaceId String? @unique
+  googleCid     String?
+  googleMapsUrl String?
+
+  // Bing
+  bingPlaceId String?
+
+  // Ratings per source
+  googleRating      Decimal? @db.Decimal(2, 1)
+  googleReviewCount Int?
+  bingRating        Decimal? @db.Decimal(2, 1)
+  bingReviewCount   Int?
+
+  // Business details
+  description    String?
+  priceLevel     String?
+  hours          Json?
+  attributes     Json?
+  serviceOptions Json?
+  menuUrl        String?
+  orderUrl       String?
+  reservationUrl String?
+
+  // Competitive signals (computed)
+  websiteQuality  String?
+  reviewVelocity  String?
+  rankingMomentum String?
+  lastReviewDate  DateTime?
+
+  // Ownership flags
+  isMine       Boolean @default(false)
+  isCompetitor Boolean @default(false)
+
+  // Metadata
+  firstSeenAt    DateTime  @default(now())
+  lastSeenAt     DateTime  @default(now())
+  lastEnrichedAt DateTime?
+  verifiedAt     DateTime?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  category       Category?        @relation(fields: [categoryId], references: [id])
+  rankings       ScanRanking[]
+  reviewSnapshots ReviewSnapshot[]
+  enrichmentLogs EnrichmentLog[]
+
+  @@index([normalizedName, city, state])
+  @@index([categoryId])
+  @@index([city, state, categoryId])
+  @@index([isMine])
+  @@index([isCompetitor])
+  @@index([lastSeenAt])
+}
+
+// ─── Review tracking time series ─────────────────────────────────────
+
+model ReviewSnapshot {
+  id          String   @id @default(uuid())
+  businessId  String
+  source      String
+  rating      Decimal  @db.Decimal(2, 1)
+  reviewCount Int
+  capturedAt  DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, source, capturedAt])
+}
+
+// ─── Scan execution tracking ─────────────────────────────────────────
+
+model Scan {
+  id              String    @id @default(uuid())
+  serviceAreaId   String
+  categoryId      String
+  keyword         String
+  searchEngine    String
+  gridSize        Int       @default(7)
+  radiusMiles     Decimal   @db.Decimal(5, 2)
+  status          String    @default("pending")
+  errorMessage    String?
+  pointsTotal     Int       @default(0)
+  pointsCompleted Int       @default(0)
+  scheduledAt     DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  serviceArea ServiceArea @relation(fields: [serviceAreaId], references: [id])
+  category    Category    @relation(fields: [categoryId], references: [id])
+  points      ScanPoint[]
+
+  @@index([serviceAreaId, categoryId, keyword, searchEngine])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ─── Individual grid point within a scan ─────────────────────────────
+
+model ScanPoint {
+  id        String   @id @default(uuid())
+  scanId    String
+  gridRow   Int
+  gridCol   Int
+  lat       Decimal  @db.Decimal(10, 7)
+  lng       Decimal  @db.Decimal(10, 7)
+  status    String   @default("pending")
+  rawHtml   String?
+  createdAt DateTime @default(now())
+
+  scan     Scan          @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  rankings ScanRanking[]
+
+  @@index([scanId])
+}
+
+// ─── Business ranking at a grid point ────────────────────────────────
+
+model ScanRanking {
+  id           String   @id @default(uuid())
+  scanPointId  String
+  businessId   String
+  rankPosition Int
+  resultType   String
+  snippet      String?
+  createdAt    DateTime @default(now())
+
+  scanPoint ScanPoint @relation(fields: [scanPointId], references: [id], onDelete: Cascade)
+  business  Business  @relation(fields: [businessId], references: [id])
+
+  @@index([scanPointId])
+  @@index([businessId])
+  @@index([businessId, createdAt])
+}
+
+// ─── Enrichment tracking ─────────────────────────────────────────────
+
+model EnrichmentLog {
+  id         String   @id @default(uuid())
+  businessId String
+  source     String
+  status     String
+  dataAdded  Json?
+  createdAt  DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId])
+}
+
+// ─── Scan scheduling ─────────────────────────────────────────────────
+
+model ScanSchedule {
+  id             String    @id @default(uuid())
+  name           String
+  cronExpression String
+  serviceAreaIds String[]
+  categoryIds    String[]
+  engineIds      String[]
+  gridSize       Int       @default(7)
+  isActive       Boolean   @default(true)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}

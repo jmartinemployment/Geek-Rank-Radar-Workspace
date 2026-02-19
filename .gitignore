@@ -1,0 +1,33 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Compiled output
+dist/
+tmp/
+
+# Environment variables & secrets
+.env
+.env.local
+.env.production
+
+# Prisma generated client
+**/src/generated/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Claude local settings (contains secrets)
+.claude/settings.local.json
+
+# MCP config (may contain secrets)
+.mcp.json
