@@ -351,3 +351,39 @@ npx prisma migrate dev  # Run migrations
 - Files created: 10 new files (5 engines + 5 parsers)
 - Files modified: 4 files (BusinessMatcher, ScanOrchestrator, ScanQueue, scan.routes)
 - Next: Integration testing (start dev server, call POST /api/scans with each engine), full scan test, CAPTCHA handling verification, frontend components for Geek-Rank-Radar
+
+**February 19, 2026 (Session — Phase 3 Parser Calibration, Queue Fix & Stealth):**
+- Phase 3 implementation complete: parser calibration, queue concurrency fix, stealth features
+- **Queue Fix (Step 5):**
+  - Rewrote `ScanQueue.ts` — replaced single `processing: boolean` with `processingEngines: Set<string>`
+  - `enqueueBatch()` now calls `ensureProcessing()` which auto-starts per-engine processing
+  - Multiple concurrent scans now process correctly (each engine runs independently)
+  - Added `getProcessingEngines()` for monitoring which engines are active
+  - Rewrote `ScanOrchestrator.ts` — replaced `await queue.processAll()` with poll-based `monitorScan()`
+  - `monitorScan()` polls every 5s with 30-min timeout, checks `pointsCompleted === pointsTotal`
+  - Failed task points now increment `pointsCompleted` too (prevents scans from never completing)
+- **Parser Calibration (Steps 1-4):**
+  - Created `scripts/fetch-samples.ts` — fetches real Google HTML for selector development
+  - Fetched 3 samples: google-search.html (bot challenge page!), google-maps.html (SPA shell), google-local.html (20 real results)
+  - Finding: `google-search.html` was a bot challenge page — Google blocked the HTTP request
+  - Finding: `google-maps.html` is a JS SPA shell — no business data in HTML, requires Playwright
+  - Finding: `google-local.html` has 20 real pizza businesses near Delray Beach — calibrated selectors from this
+  - Calibrated `GoogleLocalParser.ts` — primary selector `div.VkpGBb`, name from `.dbg0pd .OSrXXb`, rating/reviews from `span.Y0A0hc[aria-label]` (handles K/M suffixes), address from 3rd child div, category extraction from middot-separated rating line, regex fallback
+  - Calibrated `GoogleSearchParser.ts` — aligned local pack selectors with GoogleLocalParser patterns, added `parseRatingAriaLabel()`, `parseCompactNumber()`, `extractCategory()`, regex fallback for when Cheerio fails
+  - Calibrated `GoogleMapsParser.ts` — documented SPA limitation, 4-strategy extraction: JSON arrays, ld+json, proto arrays, text patterns. Maps engine needs Playwright for reliable results.
+  - Added `parserVersion` field to `SERPMetadata` type and all parsers (version `2026-02-19`)
+- **Stealth Features (Steps 6-9):**
+  - Created `src/utils/proxy.ts` — `ProxyRotator` class with round-robin rotation, 30-min failure cooldown, loads from `PROXY_LIST` or `PROXY_FILE` env vars
+  - Created `src/utils/cookies.ts` — `CookieJar` class for per-engine session cookie persistence, auto-expiry
+  - Rewrote `src/utils/userAgents.ts` — 9 consistent browser profiles (UA + Client Hints match), session rotation after 20 requests, `buildStealthHeaders()` with engine-specific Referer
+  - Rewrote `BaseEngine.ts` — exponential backoff (`2^errorCount`, capped at 5 min), graduated CAPTCHA response (15min → 2hr → 24hr), ±30% timing variation, cookie jar per engine, proxy config pass-through, profile rotation on CAPTCHA
+  - Updated all 5 scraping engines (GoogleSearch, GoogleMaps, GoogleLocal, BingLocal, DuckDuckGo) to pass domain for cookies and proxy config
+  - Added `PROXY_LIST` and `PROXY_FILE` optional env vars to `environment.ts`
+- Added `scripts/samples/` to `.gitignore`
+- Build: `npm run build` — zero TypeScript errors
+- Lint: `npm run lint` — zero ESLint errors
+- Files created: `scripts/fetch-samples.ts`, `src/utils/proxy.ts`, `src/utils/cookies.ts`
+- Files modified: `ScanQueue.ts`, `ScanOrchestrator.ts`, `BaseEngine.ts`, `userAgents.ts`, `environment.ts`, `GoogleSearchParser.ts`, `GoogleMapsParser.ts`, `GoogleLocalParser.ts`, `GoogleSearchEngine.ts`, `GoogleMapsEngine.ts`, `GoogleLocalEngine.ts`, `BingLocalEngine.ts`, `DuckDuckGoEngine.ts`, `engine.types.ts`, `.gitignore`
+- Known limitation: Google Maps scraping via HTTP returns SPA shell — needs Playwright for full results
+- Known limitation: Google Search sometimes returns bot challenge page to HTTP requests
+- Next: Integration test (POST /api/scans with google_local engine — most likely to return results), consider Playwright-based GoogleMapsEngine, frontend components

@@ -33,11 +33,13 @@ export class BingLocalEngine extends BaseEngine {
 
     try {
       const response = await axios.get(url, {
-        headers: this.buildHeaders(),
+        headers: this.buildHeaders('www.bing.com'),
         timeout: 15000,
         responseType: 'text',
+        ...this.getProxyConfig(),
       });
 
+      this.storeCookies('bing.com', response.headers['set-cookie']);
       const html = response.data as string;
 
       if (this.detectCaptcha(html)) {

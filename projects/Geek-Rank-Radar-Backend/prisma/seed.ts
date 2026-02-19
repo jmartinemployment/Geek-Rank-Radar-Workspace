@@ -1,4 +1,4 @@
-import { PrismaClient } from '../src/generated/prisma/client.js';
+import { PrismaClient } from '../src/generated/prisma/client/index.js';
 import { SERVICE_AREA_SEEDS } from '../src/config/serviceAreas.js';
 import { CATEGORY_SEEDS } from '../src/config/categories.js';
 

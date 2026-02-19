@@ -1,7 +1,9 @@
 import type { EngineConfig, ThrottleConfig } from '../../config/engines.js';
 import type { GeoPoint, SERPResult, EngineStatus } from '../../types/engine.types.js';
-import { getRandomUserAgent, buildBrowserHeaders } from '../../utils/userAgents.js';
+import { buildStealthHeaders, trackRequest, rotateProfile } from '../../utils/userAgents.js';
 import { humanDelay, sleep } from '../../utils/delay.js';
+import { CookieJar } from '../../utils/cookies.js';
+import { ProxyRotator } from '../../utils/proxy.js';
 import { logger } from '../../config/logger.js';
 
 export interface EngineState {
@@ -15,9 +17,26 @@ export interface EngineState {
   dayResetAt: number;
 }
 
+/** Shared proxy rotator singleton (all engines share the same pool) */
+let sharedProxyRotator: ProxyRotator | undefined;
+
+function getProxyRotator(): ProxyRotator {
+  if (!sharedProxyRotator) {
+    sharedProxyRotator = new ProxyRotator();
+  }
+  return sharedProxyRotator;
+}
+
+/** Maximum backoff delay in milliseconds (5 minutes) */
+const MAX_BACKOFF_MS = 5 * 60 * 1000;
+
+/** Number of requests before rotating user agent profile */
+const SESSION_ROTATION_INTERVAL = 20;
+
 /**
  * Abstract base class for all search engines.
- * Handles throttling, user agent rotation, delay, and CAPTCHA detection.
+ * Handles throttling, stealth headers, proxy rotation, cookie persistence,
+ * adaptive backoff, and CAPTCHA detection with graduated response.
  */
 export abstract class BaseEngine {
   abstract readonly engineId: string;
@@ -26,6 +45,10 @@ export abstract class BaseEngine {
   protected readonly config: EngineConfig;
   protected readonly throttle: ThrottleConfig;
   protected state: EngineState;
+  protected readonly cookieJar = new CookieJar();
+  private captchaCount = 0;
+  private captchaWindowStart = 0;
+  private requestCount = 0;
 
   constructor(config: EngineConfig) {
     this.config = config;
@@ -74,19 +97,32 @@ export abstract class BaseEngine {
 
   /**
    * Wait the appropriate delay before making the next request.
+   * Applies exponential backoff on errors and ±30% random timing variation.
    */
   protected async waitForThrottle(): Promise<void> {
-    const delay = humanDelay(
+    let baseDelay = humanDelay(
       this.throttle.minDelayMs,
       this.throttle.maxDelayMs,
       this.throttle.jitterMs,
     );
-    logger.debug(`[${this.engineId}] Waiting ${delay}ms before request`);
-    await sleep(delay);
+
+    // Exponential backoff on errors: delay * 2^errorCount
+    if (this.state.errorCount > 0) {
+      const backoffMultiplier = Math.pow(2, this.state.errorCount);
+      baseDelay = Math.min(baseDelay * backoffMultiplier, MAX_BACKOFF_MS);
+    }
+
+    // Add ±30% random timing variation to prevent periodic patterns
+    const variation = 0.7 + Math.random() * 0.6; // 0.7 to 1.3
+    const finalDelay = Math.round(baseDelay * variation);
+
+    logger.debug(`[${this.engineId}] Waiting ${finalDelay}ms before request (errors: ${this.state.errorCount})`);
+    await sleep(finalDelay);
   }
 
   /**
    * Record a successful request.
+   * Resets error count and tracks for session rotation.
    */
   protected recordRequest(): void {
     this.refreshBuckets();
@@ -94,33 +130,103 @@ export abstract class BaseEngine {
     this.state.requestsToday++;
     this.state.lastRequestAt = new Date();
     this.state.errorCount = 0;
+
+    // Session rotation: rotate UA profile after N requests
+    this.requestCount++;
+    trackRequest(SESSION_ROTATION_INTERVAL);
   }
 
   /**
-   * Record an error and apply backoff.
+   * Record an error and increment backoff counter.
    */
   protected recordError(): void {
     this.state.errorCount++;
   }
 
   /**
-   * Mark engine as blocked (e.g., CAPTCHA detected).
+   * Mark engine as blocked with graduated CAPTCHA response.
+   * 1st CAPTCHA: 15 min pause
+   * 2nd CAPTCHA within 24h: 2 hour pause
+   * 3rd+ CAPTCHA within 24h: 24 hour pause
    */
   protected markBlocked(): void {
-    const pauseMs = this.throttle.pauseOnCaptchaHours * 3_600_000;
-    this.state.blockedUntil = new Date(Date.now() + pauseMs);
+    const now = Date.now();
+
+    // Reset CAPTCHA window after 24 hours
+    if (now - this.captchaWindowStart > 24 * 3_600_000) {
+      this.captchaCount = 0;
+      this.captchaWindowStart = now;
+    }
+
+    if (this.captchaWindowStart === 0) {
+      this.captchaWindowStart = now;
+    }
+
+    this.captchaCount++;
+
+    let pauseMs: number;
+    if (this.captchaCount === 1) {
+      pauseMs = 15 * 60 * 1000; // 15 minutes
+    } else if (this.captchaCount === 2) {
+      pauseMs = 2 * 3_600_000; // 2 hours
+    } else {
+      pauseMs = 24 * 3_600_000; // 24 hours
+    }
+
+    this.state.blockedUntil = new Date(now + pauseMs);
     this.state.status = 'blocked';
+
+    // Rotate profile on CAPTCHA to get a fresh fingerprint
+    rotateProfile();
+
+    const pauseDesc = pauseMs < 3_600_000
+      ? `${Math.round(pauseMs / 60000)} minutes`
+      : `${Math.round(pauseMs / 3_600_000)} hours`;
+
     logger.warn(
-      `[${this.engineId}] Blocked until ${this.state.blockedUntil.toISOString()}`,
+      `[${this.engineId}] CAPTCHA #${this.captchaCount} in 24h window — pausing ${pauseDesc} until ${this.state.blockedUntil.toISOString()}`,
     );
   }
 
-  protected getRandomUserAgent(): string {
-    return getRandomUserAgent();
+  /**
+   * Build stealth headers with engine-specific fingerprinting.
+   * Includes consistent UA + Client Hints, Referer, and stored cookies.
+   */
+  protected buildHeaders(domain?: string): Record<string, string> {
+    const headers = buildStealthHeaders(this.engineId);
+
+    // Add stored cookies for the domain
+    if (domain) {
+      const cookieHeader = this.cookieJar.getCookieHeader(domain);
+      if (cookieHeader) {
+        headers['Cookie'] = cookieHeader;
+      }
+    }
+
+    return headers;
   }
 
-  protected buildHeaders(): Record<string, string> {
-    return buildBrowserHeaders();
+  /**
+   * Store response cookies for session persistence.
+   */
+  protected storeCookies(domain: string, setCookieHeader: string | string[] | undefined): void {
+    this.cookieJar.setCookies(domain, setCookieHeader);
+  }
+
+  /**
+   * Get proxy config for axios requests.
+   */
+  protected getProxyConfig(): Record<string, unknown> {
+    const rotator = getProxyRotator();
+    if (!rotator.hasProxies) return {};
+    return rotator.getAxiosConfig();
+  }
+
+  /**
+   * Mark a proxy as failed.
+   */
+  protected markProxyFailed(proxyUrl: string): void {
+    getProxyRotator().markFailed(proxyUrl);
   }
 
   /**

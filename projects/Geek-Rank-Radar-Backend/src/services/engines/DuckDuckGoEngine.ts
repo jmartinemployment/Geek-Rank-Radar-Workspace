@@ -35,11 +35,13 @@ export class DuckDuckGoEngine extends BaseEngine {
 
     try {
       const response = await axios.get(`https://html.duckduckgo.com/html/?q=${encodedQuery}`, {
-        headers: this.buildHeaders(),
+        headers: this.buildHeaders('html.duckduckgo.com'),
         timeout: 15000,
         responseType: 'text',
+        ...this.getProxyConfig(),
       });
 
+      this.storeCookies('duckduckgo.com', response.headers['set-cookie']);
       const html = response.data as string;
 
       if (this.detectCaptcha(html)) {

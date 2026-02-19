@@ -88,4 +88,5 @@ export interface SERPMetadata {
   rawHtml?: string;
   relatedSearches?: string[];
   peopleAlsoAsk?: string[];
+  parserVersion?: string;
 }

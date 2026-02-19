@@ -24,6 +24,9 @@ yarn-error.log
 # Prisma generated client
 src/generated/
 
+# Fetched HTML samples (parser calibration)
+scripts/samples/
+
 # System files
 .DS_Store
 Thumbs.db

@@ -44,12 +44,14 @@ export class GoogleLocalEngine extends BaseEngine {
 
     try {
       const response = await axios.get('https://www.google.com/search', {
-        headers: this.buildHeaders(),
+        headers: this.buildHeaders('www.google.com'),
         params,
         timeout: 15000,
         responseType: 'text',
+        ...this.getProxyConfig(),
       });
 
+      this.storeCookies('google.com', response.headers['set-cookie']);
       const html = response.data as string;
 
       if (this.detectCaptcha(html)) {

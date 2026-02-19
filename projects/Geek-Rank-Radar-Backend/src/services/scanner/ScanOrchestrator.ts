@@ -10,11 +10,17 @@ import { BusinessMatcher } from '../business/BusinessMatcher.js';
 import { generateGrid } from '../grid/gridGenerator.js';
 import { logger } from '../../config/logger.js';
 import { toErrorMessage } from '../../utils/errors.js';
+import { sleep } from '../../utils/delay.js';
 import type { BaseEngine } from '../engines/BaseEngine.js';
 import type { ScanTask, CreateScanRequest, FullScanRequest } from '../../types/scan.types.js';
 import type { ParsedBusiness } from '../../types/engine.types.js';
 
 const GOOGLE_ENGINE_IDS = new Set(['google_search', 'google_maps', 'google_local']);
+
+/** Poll interval for checking scan completion (ms) */
+const POLL_INTERVAL_MS = 5000;
+/** Maximum time to wait for a single scan to finish (ms) — 30 minutes */
+const SCAN_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * Coordinates full scan runs.
@@ -141,7 +147,7 @@ export class ScanOrchestrator {
       ),
     );
 
-    // Queue tasks
+    // Queue tasks — enqueueBatch auto-starts processing
     const tasks: ScanTask[] = scanPoints.map((sp: { id: string }, index: number) => ({
       scanId: scan.id,
       scanPointId: sp.id,
@@ -153,9 +159,9 @@ export class ScanOrchestrator {
 
     this.queue.enqueueBatch(tasks);
 
-    // Start processing in background
-    this.processScan(scan.id).catch((error: unknown) => {
-      logger.error(`[ScanOrchestrator] Scan ${scan.id} failed: ${toErrorMessage(error)}`);
+    // Monitor scan completion in background
+    this.monitorScan(scan.id).catch((error: unknown) => {
+      logger.error(`[ScanOrchestrator] Scan monitor ${scan.id} failed: ${toErrorMessage(error)}`);
     });
 
     return scan.id;
@@ -236,27 +242,70 @@ export class ScanOrchestrator {
     return scanIds;
   }
 
-  private async processScan(scanId: string): Promise<void> {
+  /**
+   * Poll scan completion instead of blocking on queue.processAll().
+   * Updates scan status to completed or failed when all points are done.
+   */
+  private async monitorScan(scanId: string): Promise<void> {
     await this.prisma.scan.update({
       where: { id: scanId },
       data: { status: 'running', startedAt: new Date() },
     });
 
+    const startTime = Date.now();
+
     try {
-      await this.queue.processAll();
+      while (Date.now() - startTime < SCAN_TIMEOUT_MS) {
+        await sleep(POLL_INTERVAL_MS);
 
-      const scan = await this.prisma.scan.findUnique({ where: { id: scanId } });
-      const finalStatus = scan?.pointsCompleted === scan?.pointsTotal ? 'completed' : 'failed';
+        const scan = await this.prisma.scan.findUnique({ where: { id: scanId } });
+        if (!scan) {
+          logger.warn(`[ScanOrchestrator] Scan ${scanId} not found during monitoring`);
+          return;
+        }
 
+        // Check if all points have been processed
+        if (scan.pointsCompleted >= scan.pointsTotal) {
+          await this.prisma.scan.update({
+            where: { id: scanId },
+            data: { status: 'completed', completedAt: new Date() },
+          });
+          logger.info(`[ScanOrchestrator] Scan ${scanId} completed (${scan.pointsCompleted}/${scan.pointsTotal})`);
+          return;
+        }
+
+        // Check if the engine's queue is empty and no longer processing
+        // (scan may have failed some points)
+        const queueDepth = this.queue.getQueueDepth(scan.searchEngine);
+        const isEngineProcessing = this.queue.getProcessingEngines().has(scan.searchEngine);
+
+        if (queueDepth === 0 && !isEngineProcessing) {
+          const finalStatus = scan.pointsCompleted >= scan.pointsTotal ? 'completed' : 'failed';
+          await this.prisma.scan.update({
+            where: { id: scanId },
+            data: {
+              status: finalStatus,
+              completedAt: new Date(),
+              errorMessage: finalStatus === 'failed'
+                ? `Only ${scan.pointsCompleted}/${scan.pointsTotal} points completed`
+                : null,
+            },
+          });
+          logger.info(`[ScanOrchestrator] Scan ${scanId} ${finalStatus} (${scan.pointsCompleted}/${scan.pointsTotal})`);
+          return;
+        }
+      }
+
+      // Timeout
       await this.prisma.scan.update({
         where: { id: scanId },
         data: {
-          status: finalStatus,
+          status: 'failed',
+          errorMessage: 'Scan timed out after 30 minutes',
           completedAt: new Date(),
         },
       });
-
-      logger.info(`[ScanOrchestrator] Scan ${scanId} ${finalStatus}`);
+      logger.error(`[ScanOrchestrator] Scan ${scanId} timed out`);
     } catch (error: unknown) {
       await this.prisma.scan.update({
         where: { id: scanId },
@@ -304,6 +353,13 @@ export class ScanOrchestrator {
         where: { id: task.scanPointId },
         data: { status: 'failed' },
       });
+
+      // Count failed points as completed for progress tracking
+      await this.prisma.scan.update({
+        where: { id: task.scanId },
+        data: { pointsCompleted: { increment: 1 } },
+      });
+
       logger.error(
         `[ScanOrchestrator] Task failed at (${task.point.row},${task.point.col}): ${toErrorMessage(error)}`,
       );
