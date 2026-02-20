@@ -32,6 +32,8 @@ const listScansSchema = z.object({
 export function createScanRoutes(orchestrator: ScanOrchestrator): Router {
   const router = Router();
 
+  // === Static routes MUST come before parameterized /:id routes ===
+
   // POST /api/scans — Create and queue a new scan
   router.post('/', validateBody(createScanSchema), async (req, res, next) => {
     try {
@@ -48,12 +50,49 @@ export function createScanRoutes(orchestrator: ScanOrchestrator): Router {
 
   // POST /api/scans/full — Create a full multi-engine scan (async — returns 202 immediately)
   router.post('/full', validateBody(fullScanSchema), (req, res) => {
-    // Fire and forget — scan creation + monitoring runs in background
     orchestrator.createFullScan(req.body).catch(() => {});
 
     sendSuccess(res, {
       message: 'Full scan started. Use GET /api/scans to monitor progress.',
     }, 202);
+  });
+
+  // GET /api/scans/engines/status — Get engine status (admin)
+  router.get('/engines/status', (_req, res) => {
+    const engines = orchestrator.getEngines();
+    const queue = orchestrator.getQueue();
+    const status: Record<string, unknown>[] = [];
+
+    for (const [engineId, engine] of engines) {
+      status.push({
+        engineId,
+        name: engine.engineName,
+        ...engine.getState(),
+        queueDepth: queue.getQueueDepth(engineId),
+        isProcessing: queue.getProcessingEngines().has(engineId),
+        hasRetryTimer: queue.hasRetryTimer(engineId),
+      });
+    }
+
+    sendSuccess(res, status);
+  });
+
+  // POST /api/scans/engines/:engineId/clear-block — Clear engine block (admin)
+  router.post('/engines/:engineId/clear-block', (req, res) => {
+    const engineId = req.params.engineId as string;
+    const engine = orchestrator.getEngine(engineId);
+    if (!engine) {
+      sendError(res, `Engine ${engineId} not found`, 404);
+      return;
+    }
+
+    engine.clearBlock();
+    orchestrator.getQueue().ensureProcessing();
+
+    sendSuccess(res, {
+      message: `Block cleared for ${engineId}`,
+      status: engine.getState(),
+    });
   });
 
   // GET /api/scans — List scans
@@ -87,6 +126,8 @@ export function createScanRoutes(orchestrator: ScanOrchestrator): Router {
       next(error);
     }
   });
+
+  // === Parameterized routes after static routes ===
 
   // GET /api/scans/:id — Get scan details
   router.get('/:id', async (req, res, next) => {

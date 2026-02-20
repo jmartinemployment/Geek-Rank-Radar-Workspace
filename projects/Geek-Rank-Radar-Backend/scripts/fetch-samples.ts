@@ -1,5 +1,5 @@
 /**
- * Fetch real Google HTML samples for parser calibration.
+ * Fetch real search engine HTML samples for parser calibration.
  * Run with: npx tsx scripts/fetch-samples.ts
  *
  * Saves raw HTML to scripts/samples/ for manual inspection
@@ -16,7 +16,7 @@ const SAMPLES_DIR = join(__dirname, 'samples');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function buildHeaders(): Record<string, string> {
+function buildHeaders(host?: string): Record<string, string> {
   return {
     'User-Agent': UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -32,6 +32,7 @@ function buildHeaders(): Record<string, string> {
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
     'Cache-Control': 'max-age=0',
+    ...(host ? { 'Referer': `https://${host}/` } : {}),
   };
 }
 
@@ -43,9 +44,32 @@ interface FetchTarget {
   filename: string;
   url: string;
   params: Record<string, string | number>;
+  host?: string;
 }
 
 const targets: FetchTarget[] = [
+  // --- Bing samples (fetch first since Google is more likely to CAPTCHA) ---
+  {
+    name: 'Bing Maps Local',
+    filename: 'bing-maps.html',
+    url: 'https://www.bing.com/maps',
+    params: {
+      q: 'pizza',
+      where1: 'Delray Beach, FL',
+    },
+    host: 'www.bing.com',
+  },
+  {
+    name: 'Bing Web Search (local intent)',
+    filename: 'bing-web-local.html',
+    url: 'https://www.bing.com/search',
+    params: {
+      q: 'pizza near Delray Beach, FL',
+      count: 20,
+    },
+    host: 'www.bing.com',
+  },
+  // --- Google samples ---
   {
     name: 'Google Search',
     filename: 'google-search.html',
@@ -59,12 +83,6 @@ const targets: FetchTarget[] = [
     },
   },
   {
-    name: 'Google Maps',
-    filename: 'google-maps.html',
-    url: 'https://www.google.com/maps/search/pizza+near+me/@26.4615,-80.0728,13z',
-    params: {},
-  },
-  {
     name: 'Google Local Finder',
     filename: 'google-local.html',
     url: 'https://www.google.com/search',
@@ -75,6 +93,16 @@ const targets: FetchTarget[] = [
       gl: 'us',
       uule: UULE,
     },
+  },
+  // --- DuckDuckGo sample ---
+  {
+    name: 'DuckDuckGo HTML',
+    filename: 'duckduckgo.html',
+    url: 'https://html.duckduckgo.com/html/',
+    params: {
+      q: 'pizza near Delray Beach FL',
+    },
+    host: 'html.duckduckgo.com',
   },
 ];
 
@@ -94,7 +122,7 @@ async function main(): Promise<void> {
 
     try {
       const response = await axios.get(target.url, {
-        headers: buildHeaders(),
+        headers: buildHeaders(target.host),
         params: Object.keys(target.params).length > 0 ? target.params : undefined,
         timeout: 15000,
         responseType: 'text',

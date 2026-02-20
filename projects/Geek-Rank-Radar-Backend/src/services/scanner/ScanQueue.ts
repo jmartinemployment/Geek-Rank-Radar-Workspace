@@ -109,6 +109,13 @@ export class ScanQueue {
     return this.processingEngines;
   }
 
+  /**
+   * Check if an engine has a retry timer scheduled (blocked/throttled but will retry).
+   */
+  hasRetryTimer(engineId: string): boolean {
+    return this.retryTimers.has(engineId);
+  }
+
   private isGoogleEngine(engineId: string): boolean {
     return GOOGLE_ENGINE_IDS.has(engineId);
   }

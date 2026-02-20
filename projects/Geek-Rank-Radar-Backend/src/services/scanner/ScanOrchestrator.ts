@@ -3,7 +3,6 @@ import { ScanQueue } from './ScanQueue.js';
 import { BingSearchEngine } from '../engines/BingSearchEngine.js';
 import { GoogleSearchEngine } from '../engines/GoogleSearchEngine.js';
 import { GoogleLocalEngine } from '../engines/GoogleLocalEngine.js';
-import { BingLocalEngine } from '../engines/BingLocalEngine.js';
 import { DuckDuckGoEngine } from '../engines/DuckDuckGoEngine.js';
 import { BusinessMatcher } from '../business/BusinessMatcher.js';
 import { generateGrid } from '../grid/gridGenerator.js';
@@ -46,11 +45,11 @@ export class ScanOrchestrator {
 
   private registerEngines(): void {
     // google_maps disabled — requires Playwright/Chrome which is not available on Render
+    // bing_local disabled — Bing Maps renders listings via JavaScript, static HTML has no business data
     const engineConstructors: Array<() => BaseEngine> = [
       () => new BingSearchEngine(),
       () => new GoogleSearchEngine(),
       () => new GoogleLocalEngine(),
-      () => new BingLocalEngine(),
       () => new DuckDuckGoEngine(),
     ];
 
@@ -379,8 +378,10 @@ export class ScanOrchestrator {
         // Check if queue is empty and engine stopped processing
         const queueDepth = this.queue.getQueueDepth(scan.searchEngine);
         const isEngineProcessing = this.queue.getProcessingEngines().has(scan.searchEngine);
+        const hasRetry = this.queue.hasRetryTimer(scan.searchEngine);
 
-        if (queueDepth === 0 && !isEngineProcessing) {
+        // Don't mark as failed if a retry timer is scheduled — engine will resume
+        if (queueDepth === 0 && !isEngineProcessing && !hasRetry) {
           const finalStatus = scan.pointsCompleted >= scan.pointsTotal ? 'completed' : 'failed';
           await this.prisma.scan.update({
             where: { id: scanId },
@@ -463,11 +464,12 @@ export class ScanOrchestrator {
           if (scan.pointsCompleted >= scan.pointsTotal) {
             completedNow.push(scan.id);
           } else {
-            // Check if engine queue is empty and not processing
+            // Check if engine queue is empty and not processing (and no retry scheduled)
             const queueDepth = this.queue.getQueueDepth(scan.searchEngine);
             const isEngineProcessing = this.queue.getProcessingEngines().has(scan.searchEngine);
+            const hasRetry = this.queue.hasRetryTimer(scan.searchEngine);
 
-            if (queueDepth === 0 && !isEngineProcessing) {
+            if (queueDepth === 0 && !isEngineProcessing && !hasRetry) {
               failedNow.push(scan.id);
             }
           }

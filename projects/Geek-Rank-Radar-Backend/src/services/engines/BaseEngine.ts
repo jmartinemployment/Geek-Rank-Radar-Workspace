@@ -74,6 +74,20 @@ export abstract class BaseEngine {
     return { ...this.state };
   }
 
+  /**
+   * Manually clear a block (e.g., admin reset after IP change or proxy added).
+   * Resets CAPTCHA counter and error count.
+   */
+  clearBlock(): void {
+    this.state.blockedUntil = null;
+    this.state.status = 'healthy';
+    this.state.errorCount = 0;
+    this.captchaCount = 0;
+    this.captchaWindowStart = 0;
+    rotateProfile();
+    logger.info(`[${this.engineId}] Block manually cleared`);
+  }
+
   getStatus(): EngineStatus {
     this.refreshBuckets();
 
