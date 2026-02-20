@@ -12,8 +12,10 @@ import { createBusinessRoutes } from './routes/business.routes.js';
 import { createCategoryRoutes, createServiceAreaRoutes } from './routes/category.routes.js';
 import { createSystemRoutes } from './routes/system.routes.js';
 import { createScheduleRoutes } from './routes/schedule.routes.js';
+import { createEnrichmentRoutes } from './routes/enrichment.routes.js';
 import { ScanOrchestrator } from './services/scanner/ScanOrchestrator.js';
 import { ScanScheduler } from './services/scheduler/ScanScheduler.js';
+import { EmailEnrichmentService } from './services/enrichment/EmailEnrichmentService.js';
 
 const env = loadEnvironment();
 const app = express();
@@ -30,6 +32,7 @@ app.use(healthRoutes);
 const prisma = getPrisma();
 const orchestrator = new ScanOrchestrator(prisma);
 const scheduler = new ScanScheduler(prisma, orchestrator);
+const enrichmentService = new EmailEnrichmentService(prisma);
 
 // API routes
 app.use('/api/scans', createScanRoutes(orchestrator));
@@ -38,6 +41,7 @@ app.use('/api/categories', createCategoryRoutes());
 app.use('/api/service-areas', createServiceAreaRoutes());
 app.use('/api/system', createSystemRoutes(orchestrator));
 app.use('/api/schedules', createScheduleRoutes(scheduler, orchestrator));
+app.use('/api/enrichment', createEnrichmentRoutes(enrichmentService));
 
 // Error handler (must be last)
 app.use(errorHandler);
