@@ -17,10 +17,14 @@ import type { ParsedBusiness } from '../../types/engine.types.js';
 
 const GOOGLE_ENGINE_IDS = new Set(['google_search', 'google_maps', 'google_local']);
 
-/** Poll interval for checking scan completion (ms) */
+/** Poll interval for checking single scan completion (ms) */
 const POLL_INTERVAL_MS = 5000;
+/** Poll interval for checking full scan batch completion (ms) */
+const BATCH_POLL_INTERVAL_MS = 15000;
 /** Maximum time to wait for a single scan to finish (ms) — 30 minutes */
 const SCAN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Maximum time to wait for a full scan batch to finish (ms) — 6 hours */
+const FULL_SCAN_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Coordinates full scan runs.
@@ -90,9 +94,112 @@ export class ScanOrchestrator {
   }
 
   /**
-   * Create and execute a single scan.
+   * Create and execute a single scan (from API).
+   * Uses per-scan monitoring — fine for individual scans.
    */
   async createScan(request: CreateScanRequest): Promise<string> {
+    const scanId = await this.createScanRecord(request);
+
+    // Monitor single scan completion in background
+    this.monitorScan(scanId).catch((error: unknown) => {
+      logger.error(`[ScanOrchestrator] Scan monitor ${scanId} failed: ${toErrorMessage(error)}`);
+    });
+
+    return scanId;
+  }
+
+  /**
+   * Create a full scan across multiple service areas, categories, keywords, and engines.
+   * Returns array of scan IDs created.
+   *
+   * Unlike createScan(), this does NOT spawn a monitor per scan.
+   * Instead, one shared monitorFullScan() loop checks all scans in a single query.
+   */
+  async createFullScan(request: FullScanRequest): Promise<string[]> {
+    // Resolve service areas (all active if none specified)
+    const serviceAreas = request.serviceAreaIds?.length
+      ? await this.prisma.serviceArea.findMany({
+        where: { id: { in: request.serviceAreaIds }, isActive: true },
+      })
+      : await this.prisma.serviceArea.findMany({ where: { isActive: true } });
+
+    if (serviceAreas.length === 0) {
+      throw new Error('No active service areas found');
+    }
+
+    // Resolve categories + keywords (all active if none specified)
+    const categoryFilter = request.categoryIds?.length
+      ? { id: { in: request.categoryIds }, isActive: true }
+      : { isActive: true };
+
+    const categories = await this.prisma.category.findMany({
+      where: categoryFilter,
+      include: { keywords: { where: { isActive: true } } },
+    });
+
+    if (categories.length === 0) {
+      throw new Error('No active categories found');
+    }
+
+    // Resolve engines (all registered if none specified)
+    const engineIds = request.engineIds?.length
+      ? request.engineIds.filter((id) => this.engines.has(id))
+      : [...this.engines.keys()];
+
+    if (engineIds.length === 0) {
+      throw new Error('No available engines');
+    }
+
+    const scanIds: string[] = [];
+
+    // For each combination of (serviceArea x keyword x engine), create a scan record
+    // No per-scan monitoring — we use a single batch monitor
+    for (const area of serviceAreas) {
+      for (const category of categories) {
+        const keywords = category.keywords.map((kw) => kw.keyword);
+        // If no keywords defined, use category name as fallback
+        if (keywords.length === 0) {
+          keywords.push(category.name);
+        }
+
+        for (const keyword of keywords) {
+          for (const engineId of engineIds) {
+            try {
+              const scanId = await this.createScanRecord({
+                serviceAreaId: area.id,
+                categoryId: category.id,
+                keyword,
+                searchEngine: engineId,
+                gridSize: request.gridSize,
+              });
+              scanIds.push(scanId);
+            } catch (error: unknown) {
+              logger.warn(
+                `[ScanOrchestrator] Failed to create scan for area=${area.id}, keyword="${keyword}", engine=${engineId}: ${toErrorMessage(error)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+
+    logger.info(`[ScanOrchestrator] Full scan created ${scanIds.length} scans across ${engineIds.length} engines`);
+
+    // Single batch monitor for all scans — one DB query every 15s instead of N queries every 5s
+    if (scanIds.length > 0) {
+      this.monitorFullScan(scanIds).catch((error: unknown) => {
+        logger.error(`[ScanOrchestrator] Full scan monitor failed: ${toErrorMessage(error)}`);
+      });
+    }
+
+    return scanIds;
+  }
+
+  /**
+   * Create a scan record, generate grid points, and queue tasks.
+   * Does NOT start monitoring — caller decides how to monitor.
+   */
+  private async createScanRecord(request: CreateScanRequest): Promise<string> {
     const serviceArea = await this.prisma.serviceArea.findUnique({
       where: { id: request.serviceAreaId },
     });
@@ -159,99 +266,20 @@ export class ScanOrchestrator {
 
     this.queue.enqueueBatch(tasks);
 
-    // Monitor scan completion in background
-    this.monitorScan(scan.id).catch((error: unknown) => {
-      logger.error(`[ScanOrchestrator] Scan monitor ${scan.id} failed: ${toErrorMessage(error)}`);
+    // Mark as running
+    await this.prisma.scan.update({
+      where: { id: scan.id },
+      data: { status: 'running', startedAt: new Date() },
     });
 
     return scan.id;
   }
 
   /**
-   * Create a full scan across multiple service areas, categories, keywords, and engines.
-   * Returns array of scan IDs created.
-   */
-  async createFullScan(request: FullScanRequest): Promise<string[]> {
-    // Resolve service areas (all active if none specified)
-    const serviceAreas = request.serviceAreaIds?.length
-      ? await this.prisma.serviceArea.findMany({
-        where: { id: { in: request.serviceAreaIds }, isActive: true },
-      })
-      : await this.prisma.serviceArea.findMany({ where: { isActive: true } });
-
-    if (serviceAreas.length === 0) {
-      throw new Error('No active service areas found');
-    }
-
-    // Resolve categories + keywords (all active if none specified)
-    const categoryFilter = request.categoryIds?.length
-      ? { id: { in: request.categoryIds }, isActive: true }
-      : { isActive: true };
-
-    const categories = await this.prisma.category.findMany({
-      where: categoryFilter,
-      include: { keywords: { where: { isActive: true } } },
-    });
-
-    if (categories.length === 0) {
-      throw new Error('No active categories found');
-    }
-
-    // Resolve engines (all registered if none specified)
-    const engineIds = request.engineIds?.length
-      ? request.engineIds.filter((id) => this.engines.has(id))
-      : [...this.engines.keys()];
-
-    if (engineIds.length === 0) {
-      throw new Error('No available engines');
-    }
-
-    const scanIds: string[] = [];
-
-    // For each combination of (serviceArea x keyword x engine), create a scan
-    for (const area of serviceAreas) {
-      for (const category of categories) {
-        const keywords = category.keywords.map((kw) => kw.keyword);
-        // If no keywords defined, use category name as fallback
-        if (keywords.length === 0) {
-          keywords.push(category.name);
-        }
-
-        for (const keyword of keywords) {
-          for (const engineId of engineIds) {
-            try {
-              const scanId = await this.createScan({
-                serviceAreaId: area.id,
-                categoryId: category.id,
-                keyword,
-                searchEngine: engineId,
-                gridSize: request.gridSize,
-              });
-              scanIds.push(scanId);
-            } catch (error: unknown) {
-              logger.warn(
-                `[ScanOrchestrator] Failed to create scan for area=${area.id}, keyword="${keyword}", engine=${engineId}: ${toErrorMessage(error)}`,
-              );
-            }
-          }
-        }
-      }
-    }
-
-    logger.info(`[ScanOrchestrator] Full scan created ${scanIds.length} scans`);
-    return scanIds;
-  }
-
-  /**
-   * Poll scan completion instead of blocking on queue.processAll().
-   * Updates scan status to completed or failed when all points are done.
+   * Monitor a single scan (used by createScan API endpoint).
+   * Polls DB every 5s, times out after 30 min.
    */
   private async monitorScan(scanId: string): Promise<void> {
-    await this.prisma.scan.update({
-      where: { id: scanId },
-      data: { status: 'running', startedAt: new Date() },
-    });
-
     const startTime = Date.now();
 
     try {
@@ -264,7 +292,6 @@ export class ScanOrchestrator {
           return;
         }
 
-        // Check if all points have been processed
         if (scan.pointsCompleted >= scan.pointsTotal) {
           await this.prisma.scan.update({
             where: { id: scanId },
@@ -274,8 +301,7 @@ export class ScanOrchestrator {
           return;
         }
 
-        // Check if the engine's queue is empty and no longer processing
-        // (scan may have failed some points)
+        // Check if queue is empty and engine stopped processing
         const queueDepth = this.queue.getQueueDepth(scan.searchEngine);
         const isEngineProcessing = this.queue.getProcessingEngines().has(scan.searchEngine);
 
@@ -314,8 +340,115 @@ export class ScanOrchestrator {
           errorMessage: toErrorMessage(error),
           completedAt: new Date(),
         },
-      });
+      }).catch(() => { /* ignore update failure */ });
       logger.error(`[ScanOrchestrator] Scan ${scanId} failed: ${toErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Monitor a batch of scans from createFullScan().
+   * Uses a single DB query every 15s instead of per-scan polling.
+   * Times out after 6 hours.
+   */
+  private async monitorFullScan(scanIds: string[]): Promise<void> {
+    const startTime = Date.now();
+    const scanIdSet = new Set(scanIds);
+
+    logger.info(`[ScanOrchestrator] Monitoring ${scanIds.length} scans in batch`);
+
+    try {
+      while (Date.now() - startTime < FULL_SCAN_TIMEOUT_MS) {
+        await sleep(BATCH_POLL_INTERVAL_MS);
+
+        // Single query: get status of all scans that aren't yet terminal
+        const activeScans = await this.prisma.scan.findMany({
+          where: {
+            id: { in: scanIds },
+            status: { in: ['queued', 'running'] },
+          },
+          select: {
+            id: true,
+            searchEngine: true,
+            pointsCompleted: true,
+            pointsTotal: true,
+            status: true,
+          },
+        });
+
+        if (activeScans.length === 0) {
+          logger.info(`[ScanOrchestrator] All ${scanIds.length} scans finished`);
+          return;
+        }
+
+        // Check each active scan for completion
+        const completedNow: string[] = [];
+        const failedNow: string[] = [];
+
+        for (const scan of activeScans) {
+          if (scan.pointsCompleted >= scan.pointsTotal) {
+            completedNow.push(scan.id);
+          } else {
+            // Check if engine queue is empty and not processing
+            const queueDepth = this.queue.getQueueDepth(scan.searchEngine);
+            const isEngineProcessing = this.queue.getProcessingEngines().has(scan.searchEngine);
+
+            if (queueDepth === 0 && !isEngineProcessing) {
+              failedNow.push(scan.id);
+            }
+          }
+        }
+
+        // Batch update completed scans
+        if (completedNow.length > 0) {
+          await this.prisma.scan.updateMany({
+            where: { id: { in: completedNow } },
+            data: { status: 'completed', completedAt: new Date() },
+          });
+          logger.info(`[ScanOrchestrator] ${completedNow.length} scans completed`);
+        }
+
+        // Batch update failed scans (queue empty, points incomplete)
+        if (failedNow.length > 0) {
+          await this.prisma.scan.updateMany({
+            where: { id: { in: failedNow } },
+            data: {
+              status: 'failed',
+              completedAt: new Date(),
+              errorMessage: 'Engine queue empty before all points completed',
+            },
+          });
+          logger.info(`[ScanOrchestrator] ${failedNow.length} scans failed (queue empty)`);
+        }
+
+        // Remove resolved scans from tracking
+        for (const id of [...completedNow, ...failedNow]) {
+          scanIdSet.delete(id);
+        }
+
+        const remaining = activeScans.length - completedNow.length - failedNow.length;
+        logger.info(
+          `[ScanOrchestrator] Batch progress: ${remaining} active, ${scanIds.length - scanIdSet.size} resolved`,
+        );
+      }
+
+      // Timeout — mark remaining active scans as failed
+      const timedOut = await this.prisma.scan.updateMany({
+        where: {
+          id: { in: [...scanIdSet] },
+          status: { in: ['queued', 'running'] },
+        },
+        data: {
+          status: 'failed',
+          errorMessage: 'Full scan timed out after 6 hours',
+          completedAt: new Date(),
+        },
+      });
+
+      if (timedOut.count > 0) {
+        logger.error(`[ScanOrchestrator] Full scan timed out — ${timedOut.count} scans marked failed`);
+      }
+    } catch (error: unknown) {
+      logger.error(`[ScanOrchestrator] Full scan monitor error: ${toErrorMessage(error)}`);
     }
   }
 
