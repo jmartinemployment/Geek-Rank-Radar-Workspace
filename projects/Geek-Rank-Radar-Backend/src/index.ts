@@ -65,6 +65,11 @@ app.listen(env.PORT, () => {
   logger.info(`Environment: ${env.NODE_ENV}`);
   logger.info(`Health check: http://localhost:${env.PORT}/health`);
 
+  // Recover orphaned scans from previous service restart
+  orchestrator.recoverOrphanedScans().catch((error: unknown) => {
+    logger.error(`[ScanOrchestrator] Recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+
   // Start cron scheduler after server is listening
   scheduler.start().catch((error: unknown) => {
     logger.error(`[ScanScheduler] Failed to start: ${error instanceof Error ? error.message : String(error)}`);

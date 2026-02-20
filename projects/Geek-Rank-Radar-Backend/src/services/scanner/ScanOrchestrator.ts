@@ -67,6 +67,75 @@ export class ScanOrchestrator {
     }
   }
 
+  /**
+   * Recover scans left in running/queued state after a service restart.
+   * Re-queues incomplete scan points and resumes batch monitoring.
+   */
+  async recoverOrphanedScans(): Promise<void> {
+    const orphanedScans = await this.prisma.scan.findMany({
+      where: { status: { in: ['running', 'queued'] } },
+      select: { id: true, searchEngine: true, pointsCompleted: true, pointsTotal: true, keyword: true },
+    });
+
+    if (orphanedScans.length === 0) {
+      logger.info('[ScanOrchestrator] No orphaned scans to recover');
+      return;
+    }
+
+    logger.info(`[ScanOrchestrator] Recovering ${orphanedScans.length} orphaned scans`);
+
+    let totalRequeued = 0;
+
+    for (const scan of orphanedScans) {
+      // Find scan points that haven't been completed
+      const pendingPoints = await this.prisma.scanPoint.findMany({
+        where: { scanId: scan.id, status: { in: ['pending', 'running'] } },
+        select: { id: true, gridRow: true, gridCol: true, lat: true, lng: true },
+      });
+
+      if (pendingPoints.length === 0) {
+        // All points done — mark scan as completed
+        await this.prisma.scan.update({
+          where: { id: scan.id },
+          data: { status: 'completed', completedAt: new Date() },
+        });
+        continue;
+      }
+
+      // Ensure scan is marked running
+      await this.prisma.scan.update({
+        where: { id: scan.id },
+        data: { status: 'running' },
+      });
+
+      // Re-queue incomplete points
+      const tasks: ScanTask[] = pendingPoints.map((sp) => ({
+        scanId: scan.id,
+        scanPointId: sp.id,
+        engineId: scan.searchEngine,
+        query: scan.keyword,
+        point: {
+          row: sp.gridRow,
+          col: sp.gridCol,
+          lat: Number(sp.lat),
+          lng: Number(sp.lng),
+        },
+        priority: 1,
+      }));
+
+      this.queue.enqueueBatch(tasks);
+      totalRequeued += tasks.length;
+    }
+
+    logger.info(`[ScanOrchestrator] Re-queued ${totalRequeued} tasks from ${orphanedScans.length} scans`);
+
+    // Start batch monitor for all recovered scans
+    const scanIds = orphanedScans.map((s) => s.id);
+    this.monitorFullScan(scanIds).catch((error: unknown) => {
+      logger.error(`[ScanOrchestrator] Recovery monitor failed: ${toErrorMessage(error)}`);
+    });
+  }
+
   getEngine(engineId: string): BaseEngine | undefined {
     return this.engines.get(engineId);
   }
