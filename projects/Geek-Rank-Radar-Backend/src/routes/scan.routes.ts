@@ -46,23 +46,14 @@ export function createScanRoutes(orchestrator: ScanOrchestrator): Router {
     }
   });
 
-  // POST /api/scans/full — Create a full multi-engine scan
-  router.post('/full', validateBody(fullScanSchema), async (req, res, next) => {
-    try {
-      const scanIds = await orchestrator.createFullScan(req.body);
-      const scans = await getPrisma().scan.findMany({
-        where: { id: { in: scanIds } },
-        include: { serviceArea: true, category: true },
-        orderBy: { createdAt: 'desc' },
-      });
-      sendSuccess(res, {
-        scanIds,
-        totalScans: scanIds.length,
-        scans,
-      }, 201);
-    } catch (error: unknown) {
-      next(error);
-    }
+  // POST /api/scans/full — Create a full multi-engine scan (async — returns 202 immediately)
+  router.post('/full', validateBody(fullScanSchema), (req, res) => {
+    // Fire and forget — scan creation + monitoring runs in background
+    orchestrator.createFullScan(req.body).catch(() => {});
+
+    sendSuccess(res, {
+      message: 'Full scan started. Use GET /api/scans to monitor progress.',
+    }, 202);
   });
 
   // GET /api/scans — List scans
