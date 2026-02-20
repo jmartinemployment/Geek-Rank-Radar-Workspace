@@ -40,18 +40,41 @@ export class DuckDuckGoParser {
   private parseOrganicResults($: cheerio.CheerioAPI): OrganicResult[] {
     const results: OrganicResult[] = [];
 
-    // DDG HTML version uses .result class for each result
-    $('div.result, div.web-result').each((_i, el) => {
+    // DDG HTML version selectors — try multiple class variants
+    const resultSelectors = [
+      'div.result',
+      'div.web-result',
+      'div.results_links',
+      'div[data-nrn="result"]',
+    ];
+
+    const resultSelector = resultSelectors
+      .find((sel) => $(sel).length > 0) ?? 'div.result';
+
+    $(resultSelector).each((_i, el) => {
       const $el = $(el);
 
-      const linkEl = $el.find('a.result__a, a.result__url').first();
-      const url = linkEl.attr('href') ?? '';
+      // Find the main link — try multiple selector patterns
+      const linkEl = $el.find('a.result__a, h2 a, a.result__url, a[href^="http"]').first();
+      let url = linkEl.attr('href') ?? '';
+
+      // DDG sometimes wraps URLs in redirect: //duckduckgo.com/l/?uddg=ENCODED_URL
+      if (url.includes('uddg=')) {
+        try {
+          const parsed = new URL(url, 'https://duckduckgo.com');
+          const realUrl = parsed.searchParams.get('uddg');
+          if (realUrl) url = decodeURIComponent(realUrl);
+        } catch {
+          // keep original
+        }
+      }
+
       if (!url || !url.startsWith('http')) return;
 
-      const title = $el.find('a.result__a, h2.result__title a').first().text().trim();
+      const title = $el.find('a.result__a, h2 a, h2.result__title a').first().text().trim();
       if (!title) return;
 
-      const snippet = $el.find('a.result__snippet, .result__snippet').first().text().trim();
+      const snippet = $el.find('a.result__snippet, .result__snippet, .result__body').first().text().trim();
 
       let domain = '';
       try {
@@ -78,11 +101,11 @@ export class DuckDuckGoParser {
 
     // DDG sometimes includes local business info in snippets
     // Look for results that contain phone numbers or addresses
-    $('div.result, div.web-result').each((_i, el) => {
+    $('div.result, div.web-result, div.results_links, div[data-nrn="result"]').each((_i, el) => {
       const $el = $(el);
-      const snippet = $el.find('a.result__snippet, .result__snippet').first().text().trim();
-      const title = $el.find('a.result__a, h2.result__title a').first().text().trim();
-      const url = $el.find('a.result__a').attr('href') ?? undefined;
+      const snippet = $el.find('a.result__snippet, .result__snippet, .result__body').first().text().trim();
+      const title = $el.find('a.result__a, h2 a, h2.result__title a').first().text().trim();
+      const url = $el.find('a.result__a, h2 a').attr('href') ?? undefined;
 
       if (!title || !snippet) return;
 

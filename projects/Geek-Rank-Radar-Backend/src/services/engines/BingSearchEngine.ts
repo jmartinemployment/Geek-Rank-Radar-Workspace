@@ -22,7 +22,7 @@ export class BingSearchEngine extends BaseEngine {
     super(ENGINE_CONFIGS.bing_api);
   }
 
-  async search(query: string, location: GeoPoint): Promise<SERPResult> {
+  async search(query: string, location: GeoPoint, _city?: string, _state?: string): Promise<SERPResult> {
     const apiKey = getEnv().BING_SEARCH_API_KEY;
     if (!apiKey) {
       throw new Error('BING_SEARCH_API_KEY is not configured');
@@ -40,14 +40,13 @@ export class BingSearchEngine extends BaseEngine {
       const response = await axios.get('https://api.bing.microsoft.com/v7.0/search', {
         headers: {
           'Ocp-Apim-Subscription-Key': apiKey,
+          'X-Search-Location': `lat:${location.lat};long:${location.lng};re:50000`,
         },
         params: {
           q: query,
           mkt: 'en-US',
           count: 50,
           responseFilter: 'Webpages,Places',
-          lat: location.lat,
-          lng: location.lng,
         },
         timeout: 15000,
       });
@@ -64,6 +63,12 @@ export class BingSearchEngine extends BaseEngine {
       return result;
     } catch (error: unknown) {
       this.recordError();
+      // Log response body on API errors for debugging
+      if (axios.isAxiosError(error) && error.response) {
+        logger.error(
+          `[${this.engineId}] API error ${error.response.status}: ${JSON.stringify(error.response.data).slice(0, 500)}`,
+        );
+      }
       logger.error(`[${this.engineId}] Search failed: ${toErrorMessage(error)}`);
       throw error;
     }

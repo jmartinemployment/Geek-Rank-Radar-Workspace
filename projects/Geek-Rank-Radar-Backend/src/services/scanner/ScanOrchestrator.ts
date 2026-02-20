@@ -2,7 +2,6 @@ import type { PrismaClient } from '../../generated/prisma/client/index.js';
 import { ScanQueue } from './ScanQueue.js';
 import { BingSearchEngine } from '../engines/BingSearchEngine.js';
 import { GoogleSearchEngine } from '../engines/GoogleSearchEngine.js';
-import { GoogleMapsEngine } from '../engines/GoogleMapsEngine.js';
 import { GoogleLocalEngine } from '../engines/GoogleLocalEngine.js';
 import { BingLocalEngine } from '../engines/BingLocalEngine.js';
 import { DuckDuckGoEngine } from '../engines/DuckDuckGoEngine.js';
@@ -46,10 +45,10 @@ export class ScanOrchestrator {
   }
 
   private registerEngines(): void {
+    // google_maps disabled — requires Playwright/Chrome which is not available on Render
     const engineConstructors: Array<() => BaseEngine> = [
       () => new BingSearchEngine(),
       () => new GoogleSearchEngine(),
-      () => new GoogleMapsEngine(),
       () => new GoogleLocalEngine(),
       () => new BingLocalEngine(),
       () => new DuckDuckGoEngine(),
@@ -74,7 +73,10 @@ export class ScanOrchestrator {
   async recoverOrphanedScans(): Promise<void> {
     const orphanedScans = await this.prisma.scan.findMany({
       where: { status: { in: ['running', 'queued'] } },
-      select: { id: true, searchEngine: true, pointsCompleted: true, pointsTotal: true, keyword: true },
+      select: {
+        id: true, searchEngine: true, pointsCompleted: true, pointsTotal: true, keyword: true,
+        serviceArea: { select: { name: true, state: true } },
+      },
     });
 
     if (orphanedScans.length === 0) {
@@ -121,6 +123,8 @@ export class ScanOrchestrator {
           lng: Number(sp.lng),
         },
         priority: 1,
+        city: scan.serviceArea.name,
+        state: scan.serviceArea.state,
       }));
 
       this.queue.enqueueBatch(tasks);
@@ -331,6 +335,8 @@ export class ScanOrchestrator {
       query: request.keyword,
       point: gridPoints[index],
       priority: 1,
+      city: serviceArea.name,
+      state: serviceArea.state,
     }));
 
     this.queue.enqueueBatch(tasks);
@@ -529,7 +535,7 @@ export class ScanOrchestrator {
     if (!engine) throw new Error(`Engine ${task.engineId} not found`);
 
     try {
-      const result = await engine.search(task.query, task.point);
+      const result = await engine.search(task.query, task.point, task.city, task.state);
 
       // Get the scan to find categoryId
       const scan = await this.prisma.scan.findUnique({ where: { id: task.scanId } });

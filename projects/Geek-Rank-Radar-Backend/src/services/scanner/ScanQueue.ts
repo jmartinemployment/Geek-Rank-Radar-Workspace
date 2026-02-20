@@ -3,6 +3,9 @@ import type { ScanTask } from '../../types/scan.types.js';
 import type { BaseEngine } from '../engines/BaseEngine.js';
 import { logger } from '../../config/logger.js';
 
+/** How long to wait before retrying a throttled/blocked engine (ms) */
+const RETRY_THROTTLED_MS = 60_000;
+
 const GOOGLE_ENGINE_IDS = new Set(['google_search', 'google_maps', 'google_local']);
 
 /**
@@ -14,6 +17,7 @@ export class ScanQueue {
   private readonly queues = new Map<string, ScanTask[]>();
   private readonly engines = new Map<string, BaseEngine>();
   private readonly processingEngines = new Set<string>();
+  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
   private onTaskComplete?: (task: ScanTask) => Promise<void>;
   private googleLimitChecker?: () => number;
@@ -91,6 +95,10 @@ export class ScanQueue {
       queue.length = 0;
     }
     this.processingEngines.clear();
+    for (const timer of this.retryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.retryTimers.clear();
   }
 
   isProcessing(): boolean {
@@ -121,13 +129,17 @@ export class ScanQueue {
 
     logger.info(`[ScanQueue] Started processing engine ${engineId} (${queue.length} tasks)`);
 
+    let pausedReason = '';
+
     while (queue.length > 0 && !this.stopped) {
       if (!engine.canMakeRequest()) {
-        logger.warn(`[ScanQueue] Engine ${engineId} is ${engine.getStatus()}, pausing queue`);
+        pausedReason = engine.getStatus();
+        logger.warn(`[ScanQueue] Engine ${engineId} is ${pausedReason}, pausing queue`);
         break;
       }
 
       if (this.isGoogleEngine(engineId) && this.isGoogleLimitReached()) {
+        pausedReason = 'google_daily_limit';
         logger.warn(
           `[ScanQueue] Google combined daily limit (${GOOGLE_COMBINED_DAILY_LIMIT}) reached, pausing ${engineId}`,
         );
@@ -149,6 +161,34 @@ export class ScanQueue {
     }
 
     this.processingEngines.delete(engineId);
-    logger.info(`[ScanQueue] Engine ${engineId} done (${queue.length} remaining)`);
+
+    // If paused due to throttle/block and tasks remain, schedule retry
+    if (pausedReason && queue.length > 0 && !this.stopped) {
+      this.scheduleRetry(engineId);
+    }
+
+    logger.info(`[ScanQueue] Engine ${engineId} done (${queue.length} remaining${pausedReason ? `, paused: ${pausedReason}` : ''})`);
+  }
+
+  /**
+   * Schedule a retry for a paused engine.
+   * Checks again in 60s if the engine can resume processing.
+   */
+  private scheduleRetry(engineId: string): void {
+    // Don't stack multiple retries for the same engine
+    if (this.retryTimers.has(engineId)) return;
+
+    logger.info(`[ScanQueue] Scheduling retry for ${engineId} in ${RETRY_THROTTLED_MS / 1000}s`);
+
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(engineId);
+      const queue = this.queues.get(engineId);
+      if (queue && queue.length > 0 && !this.stopped) {
+        logger.info(`[ScanQueue] Retrying engine ${engineId} (${queue.length} tasks queued)`);
+        this.ensureProcessing();
+      }
+    }, RETRY_THROTTLED_MS);
+
+    this.retryTimers.set(engineId, timer);
   }
 }

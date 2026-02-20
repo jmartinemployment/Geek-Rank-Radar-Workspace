@@ -62,6 +62,10 @@ export class DuckDuckGoEngine extends BaseEngine {
       const responseTimeMs = Date.now() - startTime;
       const result = this.parser.parse(html, query, location, responseTimeMs);
 
+      if (result.businesses.length === 0 && result.organicResults.length === 0) {
+        logger.warn(`[${this.engineId}] 0 results parsed. HTML length: ${html.length}, first 300 chars: ${html.slice(0, 300).replaceAll(/\s+/g, ' ')}`);
+      }
+
       logger.info(
         `[${this.engineId}] Search for "${query}" returned ${result.businesses.length} businesses, ${result.organicResults.length} organic`,
       );

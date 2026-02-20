@@ -20,7 +20,7 @@ export class BingLocalEngine extends BaseEngine {
     super(ENGINE_CONFIGS.bing_local);
   }
 
-  async search(query: string, location: GeoPoint): Promise<SERPResult> {
+  async search(query: string, location: GeoPoint, city?: string, state?: string): Promise<SERPResult> {
     if (!this.canMakeRequest()) {
       throw new Error(`Bing Local is ${this.getStatus()}, cannot make request`);
     }
@@ -28,11 +28,15 @@ export class BingLocalEngine extends BaseEngine {
     await this.waitForThrottle();
 
     const startTime = Date.now();
+    // Use city/state for location if available (more reliable than raw lat/lng)
+    const locationStr = city && state ? `${city}, ${state}` : `${location.lat},${location.lng}`;
     const encodedQuery = encodeURIComponent(query);
-    const url = `https://www.bing.com/maps?q=${encodedQuery}&where1=${location.lat},${location.lng}`;
+    const encodedLocation = encodeURIComponent(locationStr);
+    const url = `https://www.bing.com/maps?q=${encodedQuery}&where1=${encodedLocation}`;
 
     try {
-      const response = await axios.get(url, {
+      // Try Bing Maps first
+      let response = await axios.get(url, {
         headers: this.buildHeaders('www.bing.com'),
         timeout: 15000,
         responseType: 'text',
@@ -40,7 +44,7 @@ export class BingLocalEngine extends BaseEngine {
       });
 
       this.storeCookies('bing.com', response.headers['set-cookie']);
-      const html = response.data as string;
+      let html = response.data as string;
 
       if (this.detectCaptcha(html)) {
         this.markBlocked();
@@ -57,8 +61,34 @@ export class BingLocalEngine extends BaseEngine {
 
       this.recordRequest();
 
-      const responseTimeMs = Date.now() - startTime;
-      const result = this.parser.parse(html, query, location, responseTimeMs);
+      let responseTimeMs = Date.now() - startTime;
+      let result = this.parser.parse(html, query, location, responseTimeMs);
+
+      // Fallback: if Maps returned 0 results, try Bing web search with local intent
+      if (result.businesses.length === 0) {
+        logger.warn(`[${this.engineId}] Maps returned 0 results, trying Bing web search fallback`);
+        const localQuery = city && state
+          ? `${query} near ${city}, ${state}`
+          : `${query} near ${location.lat},${location.lng}`;
+        const fallbackUrl = `https://www.bing.com/search?q=${encodeURIComponent(localQuery)}&count=20`;
+
+        const fallbackStart = Date.now();
+        response = await axios.get(fallbackUrl, {
+          headers: this.buildHeaders('www.bing.com'),
+          timeout: 15000,
+          responseType: 'text',
+          ...this.getProxyConfig(),
+        });
+
+        this.storeCookies('bing.com', response.headers['set-cookie']);
+        html = response.data as string;
+        responseTimeMs = Date.now() - fallbackStart;
+        result = this.parser.parse(html, query, location, responseTimeMs);
+      }
+
+      if (result.businesses.length === 0) {
+        logger.warn(`[${this.engineId}] 0 businesses parsed. HTML length: ${html.length}, first 300 chars: ${html.slice(0, 300).replaceAll(/\s+/g, ' ')}`);
+      }
 
       logger.info(
         `[${this.engineId}] Search for "${query}" returned ${result.businesses.length} businesses`,

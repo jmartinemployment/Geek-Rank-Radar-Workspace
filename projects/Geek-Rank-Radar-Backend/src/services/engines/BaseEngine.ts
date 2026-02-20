@@ -67,7 +67,7 @@ export abstract class BaseEngine {
     };
   }
 
-  abstract search(query: string, location: GeoPoint): Promise<SERPResult>;
+  abstract search(query: string, location: GeoPoint, city?: string, state?: string): Promise<SERPResult>;
 
   getState(): EngineState {
     this.refreshBuckets();

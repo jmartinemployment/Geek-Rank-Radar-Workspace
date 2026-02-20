@@ -25,6 +25,10 @@ export interface ScanTask {
   query: string;
   point: GridPoint;
   priority: number;
+  /** City name for location targeting (DDG, Google UULE) */
+  city?: string;
+  /** State abbreviation for location targeting */
+  state?: string;
 }
 
 export interface ScanProgress {

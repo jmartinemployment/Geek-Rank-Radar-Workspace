@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 import { BaseEngine } from './BaseEngine.js';
 import { GoogleSearchParser } from '../parsers/GoogleSearchParser.js';
 import { ENGINE_CONFIGS } from '../../config/engines.js';
@@ -74,6 +74,10 @@ export class GoogleSearchEngine extends BaseEngine {
       const responseTimeMs = Date.now() - startTime;
       const result = this.parser.parse(html, query, location, responseTimeMs);
 
+      if (result.businesses.length === 0 && result.organicResults.length === 0) {
+        logger.warn(`[${this.engineId}] 0 results parsed. HTML length: ${html.length}, first 300 chars: ${html.slice(0, 300).replaceAll(/\s+/g, ' ')}`);
+      }
+
       logger.info(
         `[${this.engineId}] Search for "${query}" returned ${result.businesses.length} businesses, ${result.organicResults.length} organic`,
       );
@@ -81,6 +85,13 @@ export class GoogleSearchEngine extends BaseEngine {
       return result;
     } catch (error: unknown) {
       this.recordError();
+
+      // Treat 429 as a block — stop hammering Google
+      if (error instanceof AxiosError && error.response?.status === 429) {
+        logger.warn(`[${this.engineId}] HTTP 429 rate limited — triggering block`);
+        this.markBlocked();
+      }
+
       logger.error(`[${this.engineId}] Search failed: ${toErrorMessage(error)}`);
       throw error;
     }
